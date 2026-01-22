@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azure Tenant Lookup</title>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+</head>
+
+<body class="min-h-screen bg-base-200 flex flex-col items-center p-4 md:p-10">
+
+    <div class="max-w-3xl w-full space-y-8">
+        <header class="text-center">
+            <h1 class="text-4xl font-bold text-primary mb-2">Azure Tenant Lookup</h1>
+            <p class="text-base-content/70">Fetch OpenID metadata for an Azure Tenant Domain</p>
+        </header>
+
+        <div class="form-control">
+            <div class="flex flex-row md:flex-row gap-2">
+                <input type="text" id="domainInput" placeholder="example.onmicrosoft.com"
+                    class="input input-bordered flex-grow" />
+                <button onclick="fetchOIDCConfig()" id="fetchBtn" class="btn btn-primary">Lookup</button>
+            </div>
+        </div>
+
+        <div id="summaryContainer" class="text-2xl text-center hidden">
+            <span class="underline font-thin" id="domainSummary"></span>
+            is in
+            <b id="envSummary"></b>
+        </div>
+
+
+        <div id="errorAlert" class="mt-4 hidden">
+            <div class="alert alert-error py-2">
+                <span id="errorText"></span>
+            </div>
+        </div>
+
+        <div id="resultContainer" class="hidden w-full">
+            <div class="flex justify-between items-center mb-2 px-1">
+                <h2 class="text-lg font-semibold">Full Response:</h2>
+                <button onclick="clearResult(true)" class="btn btn-ghost btn-xs">Clear</button>
+            </div>
+            <pre id="jsonOutput"
+                class="bg-neutral text-neutral-content p-6 rounded-xl overflow-x-auto text-xs shadow-inner border border-neutral-focus"></pre>
+        </div>
+    </div>
+
+    <script>
+        async function fetchOIDCConfig() {
+            const input = document.getElementById('domainInput').value.trim();
+            const btn = document.getElementById('fetchBtn');
+            const resultContainer = document.getElementById('resultContainer');
+            const summaryContainer = document.getElementById('summaryContainer');
+            const domainSummary = document.getElementById('domainSummary');
+            const envSummary = document.getElementById('envSummary');
+
+            const jsonOutput = document.getElementById('jsonOutput');
+
+            clearResult(false);
+
+            if (!input) {
+                showError("Please enter a domain");
+                return;
+            }
+
+            btn.classList.add('loading');
+            btn.disabled = true;
+
+            try {
+                // Microsoft URL
+                const targetUrl = `https://login.microsoftonline.com/${input}/.well-known/openid-configuration`;
+
+                const response = await fetch(targetUrl);
+
+                if (!response.ok) {
+                    throw new Error(`Error: ${response.status} - Check if the domain is correct.`);
+                }
+
+                const data = await response.json();
+                jsonOutput.textContent = JSON.stringify(data, null, 4);
+                resultContainer.classList.remove('hidden');
+
+                summaryContainer.classList.remove('hidden');
+                envSummary.textContent = determineEnvironment(data);
+                domainSummary.textContent = input;
+
+            } catch (err) {
+                showError(err.message);
+            } finally {
+                btn.classList.remove('loading');
+                btn.disabled = false;
+            }
+        }
+
+        function determineEnvironment(resp) {
+            if (resp.tenant_region_scope === "NA" && !('tenant_region_sub_scope' in resp)) {
+                return "Commercial";
+            }
+            else if (resp.tenant_region_scope === "NA" && resp.tenant_region_sub_scope === "GCC") {
+                return "GCC";
+            }
+            else if (resp.tenant_region_scope === "USGov") {
+                return "GCC High";
+            }
+            else {
+                return `${resp.tenant_region_scope} ${'tenant_region_sub_scope' in resp ? resp.tenant_region_sub_scope : ''}`
+            }
+        }
+
+        function showError(msg) {
+            document.getElementById('errorText').textContent = msg;
+            document.getElementById('errorAlert').classList.remove('hidden');
+        }
+
+        function clearResult(clearInput) {
+            document.getElementById('summaryContainer').classList.add('hidden');
+            document.getElementById('errorAlert').classList.add('hidden');
+            document.getElementById('resultContainer').classList.add('hidden');
+            if (clearInput) {
+                document.getElementById('domainInput').value = '';
+            }
+        }
+
+        document.getElementById('domainInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') fetchOIDCConfig();
+        });
+    </script>
+</body>
+
+</html>
