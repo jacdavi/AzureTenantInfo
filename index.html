@@ -8,6 +8,7 @@
     <link rel="icon" type="image/x-icon" href="favicon.ico">
     <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
     <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dohjs@latest/dist/doh.min.js"></script>
 </head>
 
 <body class="min-h-screen bg-base-200 flex flex-col items-center p-4 md:p-10">
@@ -15,19 +16,19 @@
     <div class="max-w-3xl w-full space-y-8">
         <header class="text-center">
             <h1 class="text-4xl font-bold text-primary mb-2">Azure Tenant Lookup</h1>
-            <p class="text-base-content/70">Fetch OpenID metadata for an Azure Tenant Domain</p>
+            <p class="text-base-content/70">Fetch OpenID metadata and base domain name for an Azure Tenant Domain</p>
         </header>
 
         <div class="form-control">
             <div class="flex flex-row md:flex-row gap-2">
                 <input type="text" id="domainInput" placeholder="example.onmicrosoft.com"
                     class="input input-bordered flex-grow" />
-                <button onclick="fetchOIDCConfig()" id="fetchBtn" class="btn btn-primary">Lookup</button>
+                <button onclick="lookup()" id="fetchBtn" class="btn btn-primary">Lookup</button>
             </div>
         </div>
 
         <div id="summaryContainer" class="text-2xl text-center hidden">
-            <span class="underline font-thin" id="domainSummary"></span>
+            <span class="underline" id="domainSummary"></span>
             is in
             <b id="envSummary"></b>
         </div>
@@ -35,6 +36,11 @@
 
         <div id="errorAlert" class="mt-4 hidden">
             <div class="alert alert-error py-2">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 shrink-0 stroke-current" fill="none"
+                    viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
                 <span id="errorText"></span>
             </div>
         </div>
@@ -50,14 +56,13 @@
     </div>
 
     <script>
-        async function fetchOIDCConfig() {
+        async function lookup() {
             const input = document.getElementById('domainInput').value.trim();
             const btn = document.getElementById('fetchBtn');
             const resultContainer = document.getElementById('resultContainer');
             const summaryContainer = document.getElementById('summaryContainer');
             const domainSummary = document.getElementById('domainSummary');
             const envSummary = document.getElementById('envSummary');
-
             const jsonOutput = document.getElementById('jsonOutput');
 
             clearResult(false);
@@ -70,48 +75,79 @@
             btn.classList.add('loading');
             btn.disabled = true;
 
-            try {
-                // Microsoft URL
-                const targetUrl = `https://login.microsoftonline.com/${input}/.well-known/openid-configuration`;
-
-                const response = await fetch(targetUrl);
-
-                if (!response.ok) {
-                    throw new Error(`Error: ${response.status} - Check if the domain is correct.`);
+            Promise.allSettled([getOIDCData(input), getOnmicrosoftDomain(input)]).then(results => {
+                if (results[0].status === "rejected") {
+                    showError(results[0].reason)
+                    return;
                 }
 
-                const data = await response.json();
-                jsonOutput.textContent = JSON.stringify(data, null, 4);
+                jsonOutput.textContent = JSON.stringify(results[0].value, null, 4);
                 resultContainer.classList.remove('hidden');
 
                 summaryContainer.classList.remove('hidden');
-                envSummary.textContent = determineEnvironment(data);
-                domainSummary.textContent = input;
+                let region = results[0].value.tenant_region_sub_scope
+                switch (region) {
+                    case "DODCON":
+                        envSummary.textContent = "GCC High";
+                        break;
+                    case "DOD":
+                    case "GCC":
+                        envSummary.textContent = region;
+                        break;
+                    default:
+                        envSummary.textContent = "Commercial"
+                }
 
-            } catch (err) {
-                showError(err.message);
-            } finally {
+                if (results[1].status === "rejected") {
+                    showError(results[1].reason)
+                    domainSummary.textContent = input;
+                    // still continue with showing OIDC
+                }
+                else {
+                    domainSummary.textContent = results[1].value;
+                }
+
+            }).finally(() => {
                 btn.classList.remove('loading');
                 btn.disabled = false;
-            }
+            })
         }
 
-        function determineEnvironment(resp) {
-            if (resp.tenant_region_scope === "NA" && !('tenant_region_sub_scope' in resp)) {
-                return "Commercial";
+        async function getOIDCData(domain) {
+            // Microsoft URL
+            const targetUrl = `https://login.microsoftonline.com/${domain}/.well-known/openid-configuration`;
+
+            const oidcResponse = await fetch(targetUrl);
+            if (!oidcResponse.ok) {
+                throw `Error getting OIDC Info: ${oidcResponse.status} - Check if the domain is correct.`;
             }
-            else if (resp.tenant_region_scope === "NA" && resp.tenant_region_sub_scope === "GCC") {
-                return "GCC";
-            }
-            else if (resp.tenant_region_scope === "USGov") {
-                return "GCC High";
-            }
-            else {
-                return `${resp.tenant_region_scope} ${'tenant_region_sub_scope' in resp ? resp.tenant_region_sub_scope : ''}`
+            const oidcData = await oidcResponse.json();
+            return oidcData;
+        }
+
+        async function getOnmicrosoftDomain(domain) {
+            if (domain.includes("onmicrosoft"))
+                return domain;
+            // do DNS lookups for dkim CNAME that points to base tenant name
+            // based on https://github.com/Gerenios/AADInternals/pull/124
+            try {
+                const dnsResolver = new doh.DohResolver('https://cloudflare-dns.com/dns-query');
+                for (const selector of ["selector1", "selector2"]) {
+                    const dnsResponse = await dnsResolver.query(`${selector}._domainkey.${domain}`, 'CNAME', 'GET')
+                    for (const answer of dnsResponse.answers) {
+                        if (answer.data && answer.data.includes("onmicrosoft")) {
+                            return answer.data.split("_domainkey.")[1];
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error(err)
+                throw `Error looking up tenant's onmicrosoft domain name - this may be a proxy/network issue`;
             }
         }
 
         function showError(msg) {
+            console.error(msg);
             document.getElementById('errorText').textContent = msg;
             document.getElementById('errorAlert').classList.remove('hidden');
         }
@@ -126,7 +162,7 @@
         }
 
         document.getElementById('domainInput').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') fetchOIDCConfig();
+            if (e.key === 'Enter') lookup();
         });
     </script>
 </body>
